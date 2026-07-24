@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Database, KeyRound, Loader2, MessageSquareMore, Play, RefreshCw, RotateCcw, Save, Server, SlidersHorizontal, Square } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
+import { QVerisSettings } from "@/components/settings/QVerisSettings"; // QVERIS-INTEGRATION
 import { api, isAuthRequiredError, type ChannelRuntimeStatus, type DataSourceSettings, type LLMProviderOption, type LLMSettings } from "@/lib/api";
 import { getApiAuthKey, setApiAuthKey } from "@/lib/apiAuth";
 
@@ -245,6 +246,8 @@ export function Settings() {
           <p className="max-w-3xl text-sm text-muted-foreground">{"Configure model credentials and market data source tokens for this local project."}</p>
         </div>
         {localApiAccessSection}
+        {/* QVERIS-INTEGRATION */}
+        <QVerisSettings />
         <div className="flex min-h-32 items-center justify-center rounded-lg border bg-card p-5 text-sm text-muted-foreground">
           {settingsLoadError ? (
             <div className="text-center">
@@ -398,6 +401,9 @@ export function Settings() {
 
       {localApiAccessSection}
 
+      {/* QVERIS-INTEGRATION */}
+      <QVerisSettings />
+
       {channelsSection}
 
       <div className="space-y-2">
@@ -456,8 +462,16 @@ export function Settings() {
                 onChange={(event) => setForm({ ...form, base_url: event.target.value })}
                 className={fieldClass}
                 placeholder={selectedProvider?.default_base_url}
+                list={selectedProvider?.base_url_options?.length ? "llm-base-url-options" : undefined}
                 disabled={selectedProvider?.auth_type === "oauth"}
               />
+              {selectedProvider?.base_url_options?.length ? (
+                <datalist id="llm-base-url-options">
+                  {selectedProvider.base_url_options.map((baseUrl) => (
+                    <option key={baseUrl} value={baseUrl} />
+                  ))}
+                </datalist>
+              ) : null}
             </label>
 
             <label className="grid gap-2">

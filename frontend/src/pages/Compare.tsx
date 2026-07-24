@@ -1,5 +1,6 @@
 import i18n from '@/i18n';
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { GitCompare, ArrowRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api, type RunListItem, type RunData, type EquityPoint } from "@/lib/api";
@@ -207,41 +208,79 @@ export function Compare() {
   const [rightCurve, setRightCurve] = useState<EquityPoint[]>([]);
   const [leftLoading, setLeftLoading] = useState(false);
   const [rightLoading, setRightLoading] = useState(false);
+  const leftRequestGeneration = useRef(0);
+  const rightRequestGeneration = useRef(0);
 
   useEffect(() => {
     api.listRuns().then((items) => {
       setRuns(Array.isArray(items) ? items : []);
       if (items.length >= 2) { setLeftId(items[1].run_id); setRightId(items[0].run_id); }
       else if (items.length === 1) { setLeftId(items[0].run_id); }
-    }).catch(() => {});
+    }).catch((error) => {
+      toast.error(error instanceof Error ? error.message : i18n.t("compare.loadError"));
+    });
   }, []);
 
   useEffect(() => {
-    if (leftId) {
-      setLeftLoading(true);
-      api.getRun(leftId).then((d: RunData) => {
+    const generation = ++leftRequestGeneration.current;
+    setLeftData(null);
+    setLeftCurve([]);
+
+    if (!leftId) {
+      setLeftLoading(false);
+      return;
+    }
+
+    setLeftLoading(true);
+    api.getRun(leftId).then((d: RunData) => {
+      if (leftRequestGeneration.current === generation) {
         setLeftData(d.metrics || null);
         setLeftCurve(d.equity_curve || []);
-      }).catch(() => { setLeftData(null); setLeftCurve([]); })
-        .finally(() => setLeftLoading(false));
-    } else {
-      setLeftData(null);
-      setLeftCurve([]);
-    }
+      }
+    }).catch((error) => {
+      if (leftRequestGeneration.current === generation) {
+        setLeftData(null);
+        setLeftCurve([]);
+        toast.error(error instanceof Error ? error.message : i18n.t("compare.loadError"));
+      }
+    }).finally(() => {
+      if (leftRequestGeneration.current === generation) setLeftLoading(false);
+    });
+
+    return () => {
+      if (leftRequestGeneration.current === generation) leftRequestGeneration.current += 1;
+    };
   }, [leftId]);
 
   useEffect(() => {
-    if (rightId) {
-      setRightLoading(true);
-      api.getRun(rightId).then((d: RunData) => {
+    const generation = ++rightRequestGeneration.current;
+    setRightData(null);
+    setRightCurve([]);
+
+    if (!rightId) {
+      setRightLoading(false);
+      return;
+    }
+
+    setRightLoading(true);
+    api.getRun(rightId).then((d: RunData) => {
+      if (rightRequestGeneration.current === generation) {
         setRightData(d.metrics || null);
         setRightCurve(d.equity_curve || []);
-      }).catch(() => { setRightData(null); setRightCurve([]); })
-        .finally(() => setRightLoading(false));
-    } else {
-      setRightData(null);
-      setRightCurve([]);
-    }
+      }
+    }).catch((error) => {
+      if (rightRequestGeneration.current === generation) {
+        setRightData(null);
+        setRightCurve([]);
+        toast.error(error instanceof Error ? error.message : i18n.t("compare.loadError"));
+      }
+    }).finally(() => {
+      if (rightRequestGeneration.current === generation) setRightLoading(false);
+    });
+
+    return () => {
+      if (rightRequestGeneration.current === generation) rightRequestGeneration.current += 1;
+    };
   }, [rightId]);
 
   const leftRun = runs.find((r) => r.run_id === leftId);

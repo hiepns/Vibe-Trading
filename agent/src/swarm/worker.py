@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,8 +36,14 @@ from src.tools.redaction import is_sensitive_arg, redact_payload
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MAX_ITERATIONS = int(os.getenv("SWARM_WORKER_MAX_ITER", "50"))
-_DEFAULT_TIMEOUT_SECONDS = int(os.getenv("SWARM_WORKER_TIMEOUT", "300"))
+def _default_max_iterations() -> int:
+    from src.config.accessor import get_env_config
+    return get_env_config().swarm.swarm_worker_max_iter
+
+
+def _default_timeout_seconds() -> int:
+    from src.config.accessor import get_env_config
+    return get_env_config().swarm.swarm_worker_timeout
 
 
 def _heartbeat_interval_s() -> float:
@@ -48,10 +53,9 @@ def _heartbeat_interval_s() -> float:
     — both sides use the same env var, so they must fail the same way. A bad
     value (``"abc"``, empty) falls back to 3.0s instead of crashing import.
     """
-    try:
-        return float(os.getenv("SWARM_HEARTBEAT_INTERVAL_S", "3.0"))
-    except ValueError:
-        return 3.0
+    from src.config.accessor import get_env_config
+
+    return get_env_config().swarm.swarm_heartbeat_interval_s
 
 
 def _stream_retry_delay_s() -> float:
@@ -62,10 +66,9 @@ def _stream_retry_delay_s() -> float:
         retry. Configurable via ``SWARM_STREAM_RETRY_DELAY_S``; a bad value
         falls back to 1.0s instead of crashing import.
     """
-    try:
-        return float(os.getenv("SWARM_STREAM_RETRY_DELAY_S", "1.0"))
-    except ValueError:
-        return 1.0
+    from src.config.accessor import get_env_config
+
+    return get_env_config().swarm.swarm_stream_retry_delay_s
 
 
 _HEARTBEAT_INTERVAL_S = _heartbeat_interval_s()
@@ -281,10 +284,10 @@ def build_worker_prompt(
         "- Respond in the same language as the task prompt."
     )
 
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     prompt_parts.append(
         f"## Current Date & Time\n\n"
-        f"Today is {now.strftime('%A, %B %d, %Y %H:%M (local)')}."
+        f"Today is {now.strftime('%A, %B %d, %Y %H:%M UTC')}"
     )
 
     return "\n\n".join(prompt_parts)
@@ -334,8 +337,8 @@ def run_worker(
     """
     agent_id = agent_spec.id
     task_id = task.id
-    max_iterations = agent_spec.max_iterations or _DEFAULT_MAX_ITERATIONS
-    timeout = agent_spec.timeout_seconds or _DEFAULT_TIMEOUT_SECONDS
+    max_iterations = agent_spec.max_iterations or _default_max_iterations()
+    timeout = agent_spec.timeout_seconds or _default_timeout_seconds()
 
     _emit(event_callback, "worker_started", agent_id, task_id)
 
@@ -687,15 +690,23 @@ def run_worker(
                 emit=_on_heartbeat,
             ):
                 result = registry.execute(tc.name, args)
-            if tc.name != "load_skill" and not _is_error_result(result):
+            result_is_error = _is_error_result(result)
+            if tc.name != "load_skill" and not result_is_error:
                 data_tool_calls += 1
             tc_elapsed = time.monotonic() - tc_start
             _emit(
-                event_callback, "tool_result", agent_id, task_id,
-                {"tool": tc.name, "elapsed_ms": int(tc_elapsed * 1000),
-                 "status": "ok", "iteration": iteration,
-                  "result_preview": _preview_tool_result(result),
-                 **mcp_meta},
+                event_callback,
+                "tool_result",
+                agent_id,
+                task_id,
+                {
+                    "tool": tc.name,
+                    "elapsed_ms": int(tc_elapsed * 1000),
+                    "status": "error" if result_is_error else "ok",
+                    "iteration": iteration,
+                    "result_preview": _preview_tool_result(result),
+                    **mcp_meta,
+                },
             )
             messages.append(
                 ContextBuilder.format_tool_result(tc.id, tc.name, result[:10_000])
@@ -946,14 +957,34 @@ def _write_summary(artifact_dir: Path, summary: str) -> None:
 
 
 def _collect_artifacts(artifact_dir: Path) -> list[str]:
-    """Collect all artifact file paths from agent's artifact directory.
+    """Collect regular artifacts as deterministic run-relative paths.
 
     Args:
         artifact_dir: Path to artifacts/{agent_id}/ directory.
 
     Returns:
-        List of artifact file path strings.
+        Sorted POSIX-style paths relative to the swarm run directory. Symlinks
+        and files that resolve outside the agent artifact directory are omitted.
     """
     if not artifact_dir.exists():
         return []
-    return [str(p) for p in artifact_dir.iterdir() if p.is_file()]
+
+    run_dir = artifact_dir.parent.parent.resolve()
+    artifact_root = artifact_dir.resolve()
+    if not artifact_root.is_relative_to(run_dir):
+        return []
+
+    artifacts: list[str] = []
+    for path in artifact_dir.rglob("*"):
+        try:
+            if path.is_symlink():
+                continue
+            resolved = path.resolve(strict=True)
+            if not resolved.is_relative_to(artifact_root) or not resolved.is_file():
+                continue
+            artifacts.append(resolved.relative_to(run_dir).as_posix())
+        except (OSError, RuntimeError, ValueError):
+            # A concurrently removed file, symlink loop, or containment
+            # failure is not a durable artifact and must not escape the run.
+            continue
+    return sorted(artifacts)

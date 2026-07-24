@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urlparse
 
+from src.config.accessor import get_env_config
+
 try:
     import httpx
 except ImportError:
@@ -23,6 +25,24 @@ except ImportError:
 
 DEFAULT_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
 DEFAULT_ORIGINATOR = "vibe-trading"
+
+
+class CodexStreamError(RuntimeError):
+    """Raised when the OpenAI Codex stream responds with an HTTP error.
+
+    Subclasses ``RuntimeError`` to preserve the historical contract (callers
+    historically caught ``RuntimeError`` here) but carries an explicit
+    ``status_code`` so the upstream ``ProviderStreamError`` classification
+    can distinguish transient (5xx/408/429) failures from deterministic
+    4xx that should not be retried. Without this, every Codex failure
+    looked ``status_code=None`` → ``retryable=True`` and codex 400/401/403
+    responses wasted a retry budget.
+    """
+
+    def __init__(self, status_code: int, detail: Any) -> None:
+        self.status_code = int(status_code)
+        message = f"OpenAI Codex HTTP {self.status_code}: {str(detail)[:500]}"
+        super().__init__(message)
 
 
 @dataclass
@@ -356,7 +376,7 @@ class OpenAICodexLLM:
         self.tools = tools or []
         self.reasoning_effort = reasoning_effort
         self.codex_url = validate_codex_base_url(
-            codex_url or os.getenv("OPENAI_CODEX_BASE_URL", DEFAULT_CODEX_URL)
+            codex_url or get_env_config().llm.openai_codex_base_url
         )
 
     def bind_tools(self, tools: list[dict[str, Any]]) -> "OpenAICodexLLM":
@@ -400,7 +420,10 @@ class OpenAICodexLLM:
             with client.stream("POST", self.codex_url, headers=self._headers(), json=self._body(messages, stream=True)) as response:
                 if response.status_code != 200:
                     raw = response.read().decode("utf-8", "ignore")
-                    raise RuntimeError(f"OpenAI Codex HTTP {response.status_code}: {raw[:500]}")
+                    # Raise the typed CodexStreamError (carries ``status_code``)
+                    # so ``ProviderStreamError.retryable`` can correctly classify
+                    # deterministic 4xx as non-retryable.
+                    raise CodexStreamError(response.status_code, raw)
                 yield from _message_chunks_from_events(_events_from_lines(response.iter_lines()))
 
     def invoke(self, messages: list[dict[str, Any]], config: Optional[dict[str, Any]] = None) -> CodexAIMessage:

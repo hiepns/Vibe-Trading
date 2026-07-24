@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
 
+from src.config.accessor import get_env_config
 from src.scheduled_research.models import JobStatus, ScheduledResearchJob, validate_schedule
 from src.scheduled_research.store import ScheduledResearchJobStore
 
@@ -45,8 +46,9 @@ def scheduler_enabled_from_env(value: str | None = None) -> bool:
     The feature is disabled by default. Pass *value* in tests to avoid mutating
     process environment.
     """
-    raw = os.getenv(SCHEDULER_ENABLED_ENV, "") if value is None else value
-    return raw.strip().lower() in _TRUE_VALUES
+    if value is not None:
+        return value.strip().lower() in _TRUE_VALUES
+    return get_env_config().agent_tuning.vibe_trading_enable_scheduler
 
 
 def is_due(job: ScheduledResearchJob, now_ms: int) -> bool:
@@ -109,12 +111,19 @@ def _parse_cron_field(part: str, low: int, high: int) -> set[int] | None:
 
 
 def _day_matches(dt: datetime, doms: set[int] | None, months: set[int] | None, dows: set[int] | None) -> bool:
+    if months is not None and dt.month not in months:
+        return False
+
     cron_day_of_week = (dt.weekday() + 1) % 7  # cron convention: Sunday == 0
-    return (
-        (doms is None or dt.day in doms)
-        and (months is None or dt.month in months)
-        and (dows is None or cron_day_of_week in dows)
-    )
+    day_of_month_matches = doms is None or dt.day in doms
+    day_of_week_matches = dows is None or cron_day_of_week in dows
+
+    # Standard five-field cron treats day-of-month and day-of-week as an OR
+    # when both fields are restricted. A wildcard in either field keeps the
+    # other field authoritative.
+    if doms is not None and dows is not None:
+        return day_of_month_matches or day_of_week_matches
+    return day_of_month_matches and day_of_week_matches
 
 
 class ScheduledResearchExecutor:
